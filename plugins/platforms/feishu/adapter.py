@@ -1492,6 +1492,12 @@ class FeishuAdapter(BasePlatformAdapter):
         self._chat_locks: "collections.OrderedDict[str, asyncio.Lock]" = collections.OrderedDict()  # chat_id → lock (per-chat serial processing, LRU-bounded)
         self._sent_message_ids_to_chat: Dict[str, str] = {}  # message_id → chat_id (for reaction routing)
         self._sent_message_id_order: List[str] = []  # LRU order for _sent_message_ids_to_chat
+        # Thread-reply-implies-mention: replying to the bot's message (or inside a
+        # topic the bot has posted in) counts as an implicit mention, so ongoing
+        # topic conversations don't require @-ing the bot on every turn.
+        # In-memory only — after a gateway restart, one @ re-registers the thread.
+        self._bot_message_ids: "OrderedDict[str, None]" = OrderedDict()  # our sent message_ids (LRU)
+        self._bot_thread_ids: "OrderedDict[str, None]" = OrderedDict()   # thread_ids we posted in (LRU)
         self._chat_info_cache: Dict[str, Dict[str, Any]] = {}
         self._message_text_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
         self._app_lock_identity: Optional[str] = None
@@ -4327,7 +4333,10 @@ class FeishuAdapter(BasePlatformAdapter):
         ):
             return "group_policy_rejected"
         if require_mention and not self._mentions_self(message):
-            return "group_policy_rejected"
+            # 回复机器人的消息/在它参与的话题里发言 = 隐式 @：
+            # 话题里逐条 @ 太反直觉，对话已经明确指向机器人了。
+            if not self._is_reply_to_bot(message):
+                return "group_policy_rejected"
         return None
 
     def _require_mention_for(self, chat_id: str) -> bool:
@@ -4672,6 +4681,9 @@ class FeishuAdapter(BasePlatformAdapter):
         if not effective_reply_to and metadata and metadata.get("thread_id"):
             effective_reply_to = metadata.get("reply_to_message_id")
         reply_in_thread = bool((metadata or {}).get("thread_id"))
+        # 发进话题的消息按 metadata 记 thread_id（响应不一定回显），
+        # 后续该话题里的回复即可免 @（见 _is_reply_to_bot）。
+        self._remember_bot_send(message_id=None, thread_id=(metadata or {}).get("thread_id"))
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload,
@@ -4739,10 +4751,40 @@ class FeishuAdapter(BasePlatformAdapter):
     def _finalize_send_result(self, response: Any, default_message: str) -> SendResult:
         if not self._response_succeeded(response):
             return self._response_error_result(response, default_message=default_message)
+        message_id = self._extract_response_field(response, "message_id")
+        self._remember_bot_send(
+            message_id=message_id,
+            thread_id=self._extract_response_field(response, "thread_id"),
+        )
         return SendResult(
             success=True,
-            message_id=self._extract_response_field(response, "message_id"),
+            message_id=message_id,
             raw_response=response,
+        )
+
+    def _remember_bot_send(self, *, message_id: Optional[str], thread_id: Optional[str]) -> None:
+        """Record our own outbound message/thread ids (LRU) for the
+        thread-reply-implies-mention check in ``_admit``."""
+        for value, store in ((message_id, self._bot_message_ids), (thread_id, self._bot_thread_ids)):
+            if not value:
+                continue
+            store[value] = None
+            store.move_to_end(value)
+            while len(store) > _FEISHU_BOT_MSG_TRACK_SIZE:
+                store.popitem(last=False)
+
+    def _is_reply_to_bot(self, message: Any) -> bool:
+        """True when *message* continues a conversation with the bot:
+        it replies to one of our messages (parent/root), or sits in a
+        topic/thread we have posted in. Used to waive ``require_mention`` —
+        replying to the bot is as explicit an address as @-ing it."""
+        parent_id = getattr(message, "parent_id", None) or ""
+        root_id = getattr(message, "root_id", None) or ""
+        thread_id = getattr(message, "thread_id", None) or ""
+        return bool(
+            (parent_id and parent_id in self._bot_message_ids)
+            or (root_id and root_id in self._bot_message_ids)
+            or (thread_id and thread_id in self._bot_thread_ids)
         )
 
     # =========================================================================
