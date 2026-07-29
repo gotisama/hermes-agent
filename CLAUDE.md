@@ -3,6 +3,13 @@
 本仓库是 **NousResearch/hermes-agent 的本地 fork**，用途：自己改代码（主要是飞书/钉钉
 平台适配器）+ 持续跟进上游更新。上游动得很快（每天都有合并），分支纪律必须守住。
 
+## 远端布局
+
+| 远端 | 地址 | 用途 |
+|---|---|---|
+| `origin` | `https://github.com/NousResearch/hermes-agent.git` | **只拉**，上游更新来源 |
+| `fork` | `git@github.com:gotisama/hermes-agent.git` | **只推**，自己的补丁集（SSH key `~/.ssh/id_ed25519_github`，走 ssh.github.com:443） |
+
 ## 分支约定
 
 | 分支 | 用途 | 纪律 |
