@@ -954,6 +954,23 @@ class DingTalkAdapter(BasePlatformAdapter):
             "markdown": {"title": "Hermes", "text": normalized},
         }
 
+        # 模拟"引用回复"（钉钉 API 不给机器人真正的引用能力，SDK 里无 quote 模型）：
+        # 群聊里最终回复时 @ 回提问人，并在首行摘录其原话，视觉上对齐飞书的挂靠回复。
+        if is_final_reply and current_message is not None:
+            is_group = str(getattr(current_message, "conversation_type", "1")) == "2"
+            if is_group:
+                staff_id = getattr(current_message, "sender_staff_id", "") or ""
+                nick = getattr(current_message, "sender_nick", "") or ""
+                orig = (self._extract_text(current_message) or "").strip().replace("\n", " ")
+                if orig:
+                    quote = orig[:40] + ("…" if len(orig) > 40 else "")
+                    payload["markdown"]["text"] = (
+                        f"> **@{nick}**：{quote}\n\n{normalized}" if nick
+                        else f"> {quote}\n\n{normalized}"
+                    )
+                if staff_id:
+                    payload["at"] = {"atUserIds": [staff_id]}
+
         try:
             resp = await self._http_client.post(
                 session_webhook, json=payload, timeout=15.0
