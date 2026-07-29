@@ -522,6 +522,10 @@ class DingTalkAdapter(BasePlatformAdapter):
             return True
         if self._message_mentions_bot(message):
             return True
+        # 群里发文件时钉钉不允许同时 @ 机器人：file 等媒体消息视为已指向机器人，
+        # 免 @ 放行（否则报价 Excel 永远进不来）。text/richText/picture 仍走 @ 门禁。
+        if (getattr(message, "message_type", "") or "") not in ("text", "richText", "picture"):
+            return True
         return self._message_matches_mention_patterns(text)
 
     def _spawn_bg(self, coro) -> None:
@@ -664,6 +668,13 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         # Determine message type and build media list
         msg_type, media_urls, media_types = self._extract_media(message)
+
+        # 诊断：SDK 没解析掉的字段(extensions)原样打出来，用于摸清「引用回复文件」
+        # 等未知消息形态的 payload 结构。确认结构后可降回 debug。
+        _ext = getattr(message, "extensions", None) or {}
+        if _ext:
+            logger.info("[Dingtalk] unparsed extensions (msgtype=%s): %s",
+                        getattr(message, "message_type", ""), str(_ext)[:1200])
 
         if not text and not media_urls:
             logger.debug("[%s] Empty message, skipping", self.name)
@@ -810,6 +821,20 @@ class DingTalkAdapter(BasePlatformAdapter):
                                 media_types.append("application/octet-stream")
                                 if msg_type == MessageType.TEXT:
                                     msg_type = MessageType.DOCUMENT
+
+        # msgtype=file(及 video/audio 等)：dingtalk-stream 的 from_dict 不解析这些
+        # 类型，content(含 downloadCode/fileName) 原样落在 extensions['content'] 里。
+        # 不接的话整条消息会被当空消息静默丢弃——报价 Excel 就是这么丢的。
+        # downloadCode 在此之前已由 _resolve_media_codes 原地换成下载 URL。
+        if not media_urls:
+            ext_content = (getattr(message, "extensions", None) or {}).get("content")
+            if isinstance(ext_content, dict):
+                dl_url = ext_content.get("downloadCode") or ext_content.get("download_code") or ""
+                if dl_url:
+                    media_urls.append(dl_url)
+                    media_types.append("application/octet-stream")
+                    if msg_type == MessageType.TEXT:
+                        msg_type = MessageType.DOCUMENT
 
         msg_type_str = getattr(message, "message_type", "") or ""
         if msg_type_str == "picture" and not media_urls:
@@ -1322,6 +1347,13 @@ class DingTalkAdapter(BasePlatformAdapter):
                     for key in ("downloadCode", "pictureDownloadCode", "download_code"):
                         if item.get(key):
                             codes_to_resolve.append((item, key))
+
+        # 3. file 等 SDK 未解析类型：content 落在 extensions 里（配合 _extract_media 的兜底）
+        ext_content = (getattr(message, "extensions", None) or {}).get("content")
+        if isinstance(ext_content, dict):
+            for key in ("downloadCode", "download_code"):
+                if ext_content.get(key):
+                    codes_to_resolve.append((ext_content, key))
 
         if not codes_to_resolve:
             return
