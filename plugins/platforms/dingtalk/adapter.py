@@ -669,12 +669,11 @@ class DingTalkAdapter(BasePlatformAdapter):
         # Determine message type and build media list
         msg_type, media_urls, media_types = self._extract_media(message)
 
-        # 诊断：SDK 没解析掉的字段(extensions)原样打出来，用于摸清「引用回复文件」
-        # 等未知消息形态的 payload 结构。确认结构后可降回 debug。
+        # SDK 没解析掉的字段(extensions)——引用回复/file 消息的结构都从这里确认过
         _ext = getattr(message, "extensions", None) or {}
         if _ext:
-            logger.info("[Dingtalk] unparsed extensions (msgtype=%s): %s",
-                        getattr(message, "message_type", ""), str(_ext)[:1200])
+            logger.debug("[Dingtalk] unparsed extensions (msgtype=%s): %s",
+                         getattr(message, "message_type", ""), str(_ext)[:1200])
 
         if not text and not media_urls:
             logger.debug("[%s] Empty message, skipping", self.name)
@@ -719,6 +718,29 @@ class DingTalkAdapter(BasePlatformAdapter):
             text[:80] if text else "(media)",
         )
         await self.handle_message(event)
+
+    @staticmethod
+    def _extension_media_contents(message: "ChatbotMessage") -> list:
+        """extensions 里可能携带 downloadCode 的 content dict 清单。
+
+        两个来源（均为 dingtalk-stream from_dict 不解析、原样落 extensions 的字段）：
+        - msgtype=file 直接发文件：``extensions['content']``
+        - 引用回复文件：msgtype=text，SDK 只把正文解析进 msg.text，原始 dict 同时
+          落在 ``extensions['text']``，被引用文件在其 ``repliedMsg.content`` 里
+          （实测结构：{'isReplyMsg': True, 'repliedMsg': {'msgType': 'file',
+          'content': {'fileName':…, 'downloadCode':…, 'fileId':…}}}）
+        """
+        out = []
+        ext = getattr(message, "extensions", None) or {}
+        c = ext.get("content")
+        if isinstance(c, dict):
+            out.append(c)
+        raw_text = ext.get("text")
+        if isinstance(raw_text, dict):
+            replied = raw_text.get("repliedMsg")
+            if isinstance(replied, dict) and isinstance(replied.get("content"), dict):
+                out.append(replied["content"])
+        return out
 
     @staticmethod
     def _extract_text(message: "ChatbotMessage") -> str:
@@ -822,13 +844,12 @@ class DingTalkAdapter(BasePlatformAdapter):
                                 if msg_type == MessageType.TEXT:
                                     msg_type = MessageType.DOCUMENT
 
-        # msgtype=file(及 video/audio 等)：dingtalk-stream 的 from_dict 不解析这些
-        # 类型，content(含 downloadCode/fileName) 原样落在 extensions['content'] 里。
-        # 不接的话整条消息会被当空消息静默丢弃——报价 Excel 就是这么丢的。
+        # msgtype=file(及 video/audio 等) 与「引用回复文件」：dingtalk-stream 的
+        # from_dict 不解析这些，content(含 downloadCode/fileName) 落在 extensions。
+        # 不接的话文件被静默丢弃/机器人"看不见"引用的 Excel。
         # downloadCode 在此之前已由 _resolve_media_codes 原地换成下载 URL。
         if not media_urls:
-            ext_content = (getattr(message, "extensions", None) or {}).get("content")
-            if isinstance(ext_content, dict):
+            for ext_content in self._extension_media_contents(message):
                 dl_url = ext_content.get("downloadCode") or ext_content.get("download_code") or ""
                 if dl_url:
                     media_urls.append(dl_url)
@@ -1348,9 +1369,8 @@ class DingTalkAdapter(BasePlatformAdapter):
                         if item.get(key):
                             codes_to_resolve.append((item, key))
 
-        # 3. file 等 SDK 未解析类型：content 落在 extensions 里（配合 _extract_media 的兜底）
-        ext_content = (getattr(message, "extensions", None) or {}).get("content")
-        if isinstance(ext_content, dict):
+        # 3. file 等 SDK 未解析类型 + 引用回复里被引用的文件（配合 _extract_media 的兜底）
+        for ext_content in self._extension_media_contents(message):
             for key in ("downloadCode", "download_code"):
                 if ext_content.get(key):
                     codes_to_resolve.append((ext_content, key))
