@@ -699,6 +699,33 @@ class DingTalkAdapter(BasePlatformAdapter):
         except (ValueError, OSError, TypeError):
             timestamp = datetime.now(tz=timezone.utc)
 
+        # 引用回复上下文：被引用消息的原文/文件名传给 agent 做指代锚点。
+        # 同一群会话里多任务并存时（A表已处理、B表在聊），用户「引用A的汇报
+        # +修正意见」必须能锚定到A——此前钉钉引用内容根本没传（恒空），
+        # agent 只能靠近因猜，多表场景必错。数据在 extensions['text'].repliedMsg
+        # （SDK 不解析，结构见 _extension_media_contents 注释）。
+        reply_to_id = None
+        reply_to_text = None
+        reply_to_author = None
+        reply_is_own = False
+        _raw_text = (getattr(message, "extensions", None) or {}).get("text")
+        if isinstance(_raw_text, dict) and isinstance(_raw_text.get("repliedMsg"), dict):
+            _rm = _raw_text["repliedMsg"]
+            reply_to_id = _rm.get("msgId")
+            reply_to_author = _rm.get("senderId")
+            reply_is_own = bool(reply_to_author) and reply_to_author == (
+                getattr(message, "chatbot_user_id", None) or ""
+            )
+            _rc = _rm.get("content")
+            if isinstance(_rc, dict):
+                reply_to_text = _rc.get("fileName") or _rc.get("content")
+                if _rm.get("msgType") == "file" and reply_to_text:
+                    reply_to_text = f"[文件] {reply_to_text}"
+            elif isinstance(_rc, str):
+                reply_to_text = _rc
+            if reply_to_text:
+                reply_to_text = str(reply_to_text)[:800]
+
         event = MessageEvent(
             text=text,
             message_type=msg_type,
@@ -708,6 +735,10 @@ class DingTalkAdapter(BasePlatformAdapter):
             media_urls=media_urls,
             media_types=media_types,
             timestamp=timestamp,
+            reply_to_message_id=reply_to_id,
+            reply_to_text=reply_to_text,
+            reply_to_author_id=reply_to_author,
+            reply_to_is_own_message=reply_is_own,
         )
 
         logger.debug(
