@@ -2243,8 +2243,17 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     if dingtalk_client_id and dingtalk_client_secret:
         if Platform.DINGTALK not in config.platforms:
             config.platforms[Platform.DINGTALK] = PlatformConfig()
-        config.platforms[Platform.DINGTALK].enabled = True
-        config.platforms[Platform.DINGTALK].extra.update({
+        _dt_cfg = config.platforms[Platform.DINGTALK]
+        # Honor an explicit ``enabled: false`` from YAML (#41112 semantics —
+        # same as _enable_from_env): credential presence must not force-enable
+        # a platform the user explicitly disabled. Needed for multiplex setups
+        # where creds live in the default profile's env (the adapter registry
+        # check reads os.getenv) but the platform belongs to a secondary
+        # profile — otherwise the default profile opens a duplicate connection
+        # and the IM silently load-balances messages between the two.
+        if _dt_cfg.enabled or not _dt_cfg.extra.get("_enabled_explicit", False):
+            _dt_cfg.enabled = True
+        _dt_cfg.extra.update({
             "client_id": dingtalk_client_id,
             "client_secret": dingtalk_client_secret,
         })
@@ -2263,7 +2272,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     if feishu_app_id and feishu_app_secret:
         if Platform.FEISHU not in config.platforms:
             config.platforms[Platform.FEISHU] = PlatformConfig()
-        config.platforms[Platform.FEISHU].enabled = True
+        _fs_cfg = config.platforms[Platform.FEISHU]
+        # Same explicit-disable honor as DingTalk above (#41112 semantics).
+        if _fs_cfg.enabled or not _fs_cfg.extra.get("_enabled_explicit", False):
+            _fs_cfg.enabled = True
         config.platforms[Platform.FEISHU].extra.update({
             "app_id": feishu_app_id,
             "app_secret": feishu_app_secret,
