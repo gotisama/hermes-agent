@@ -2726,7 +2726,10 @@ class MCPServerTask:
 
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP transport."""
-        if not _MCP_HTTP_AVAILABLE:
+        # SSE transport uses mcp.client.sse, not streamable_http — gate only
+        # the non-SSE (Streamable HTTP) path so SSE servers aren't blocked by
+        # a missing old-style streamablehttp_client import.
+        if config.get("transport") != "sse" and not _MCP_HTTP_AVAILABLE:
             raise ImportError(
                 f"MCP server '{self.name}' requires HTTP transport but "
                 "mcp.client.streamable_http is not available. "
