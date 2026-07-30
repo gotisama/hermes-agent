@@ -718,7 +718,10 @@ class DingTalkAdapter(BasePlatformAdapter):
             )
             _rc = _rm.get("content")
             if isinstance(_rc, dict):
-                reply_to_text = _rc.get("fileName") or _rc.get("content")
+                # 各 msgType 的 content 键位不同：file=fileName，text=content，
+                # markdown(机器人自己的回复被引用时)=text/title
+                reply_to_text = (_rc.get("fileName") or _rc.get("content")
+                                 or _rc.get("text") or _rc.get("title"))
                 if _rm.get("msgType") == "file" and reply_to_text:
                     reply_to_text = f"[文件] {reply_to_text}"
             elif isinstance(_rc, str):
